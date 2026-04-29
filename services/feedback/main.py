@@ -1,5 +1,6 @@
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,7 +11,15 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Feedback Service", version="1.0.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    logger.info("Feedback service starting")
+    yield
+    logger.info("Feedback service shutting down")
+
+
+app = FastAPI(title="Feedback Service", version="1.0.0", lifespan=_lifespan)
 
 
 class FeedbackEntryOut(BaseModel):
@@ -134,7 +143,14 @@ def create_feedback(body: FeedbackCreate) -> FeedbackEntryOut:
             (str(fid), str(body.ingredient_id), body.source, body.rating, body.comment, now),
         )
         _refresh_summary_for_ingredient(cur, body.ingredient_id)
-    return get_feedback_entry(fid)
+    entry = get_feedback_entry(fid)
+    logger.info(
+        "Feedback entry created: feedback_id=%s ingredient_id=%s rating=%s",
+        fid,
+        body.ingredient_id,
+        body.rating,
+    )
+    return entry
 
 
 def get_feedback_entry(feedback_id: uuid.UUID) -> FeedbackEntryOut:
