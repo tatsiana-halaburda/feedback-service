@@ -8,6 +8,7 @@ import pyodbc
 from fastapi import FastAPI, HTTPException, Query, status
 from libs.db import cursor, transaction
 from pydantic import BaseModel, Field
+from services.feedback import domain
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,23 @@ def health() -> dict[str, Any]:
 def create_feedback(body: FeedbackCreate) -> FeedbackEntryOut:
     fid = uuid.uuid4()
     now = datetime.now(UTC)
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT TOP 1 Source, CreatedAt
+            FROM [Tanya_Feedback].[FeedbackEntries]
+            WHERE IngredientId = ? AND Source = ? AND IsArchived = 0
+            ORDER BY CreatedAt DESC
+            """,
+            (str(body.ingredient_id), body.source),
+        )
+        prev_row = cur.fetchone()
+    if prev_row:
+        prev_dt = prev_row.CreatedAt
+        if prev_dt.tzinfo is None:
+            prev_dt = prev_dt.replace(tzinfo=UTC)
+        if domain.is_duplicate(now, prev_dt, body.source, str(prev_row.Source)):
+            raise HTTPException(status_code=409, detail="Duplicate feedback")
     with transaction() as cur:
         cur.execute(
             """
@@ -292,6 +310,39 @@ def delete_feedback_summary(ingredient_id: uuid.UUID) -> None:
             "DELETE FROM [Tanya_Feedback].[FeedbackSummary] WHERE IngredientId = ?",
             str(ingredient_id),
         )
+
+
+class FeedbackDistributionOut(BaseModel):
+    ingredient_id: uuid.UUID
+    distribution: dict[int, int]
+    weighted_average: float
+    total_count: int
+
+
+@app.get("/feedback/{ingredient_id}/distribution", response_model=FeedbackDistributionOut)
+def feedback_rating_distribution(ingredient_id: uuid.UUID) -> FeedbackDistributionOut:
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT Rating
+            FROM [Tanya_Feedback].[FeedbackEntries]
+            WHERE IngredientId = ? AND IsArchived = 0
+            """,
+            str(ingredient_id),
+        )
+        ratings = [int(r.Rating) for r in cur.fetchall()]
+    try:
+        dist = domain.compute_distribution(ratings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    avg = domain.weighted_average(dist)
+    total = sum(dist.values())
+    return FeedbackDistributionOut(
+        ingredient_id=ingredient_id,
+        distribution=dist,
+        weighted_average=avg,
+        total_count=total,
+    )
 
 
 @app.get("/feedback/{ingredient_id}", response_model=list[FeedbackEntryOut])
